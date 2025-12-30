@@ -7,7 +7,7 @@ class SensitiveFields(object):
     _SENSITIVE_SUFFIXES = ("_id", "_key")
     _SENSITIVE_FIELDS = ("api_key", "session_id", "password", "token")
     _instance = None  # Class variable to store the single instance
-    enabled = True
+    enabled = False
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:

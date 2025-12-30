@@ -57,9 +57,12 @@ def add_serializable(cls=None):
 
 
 def _to_dict(self):
-    data = asdict(self)
-    _warn_sensitive_fields(self, data)
-    return data
+    try:
+        data = asdict(self)
+        _warn_sensitive_fields(self, data)
+        return data
+    except Exception as e:
+        print(f"Error deserializing DTO: {e}")
 
 
 def _enum_hook(value, enum_type):
