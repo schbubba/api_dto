@@ -1,8 +1,9 @@
 from abc import abstractmethod
 
+import types
 import xml.etree.ElementTree as ET
 from dataclasses import fields
-from typing import Optional, Any, List, TypeVar, Type, get_args, get_origin
+from typing import Optional, Any, List, TypeVar, Type, Union, get_args, get_origin
 
 T = TypeVar("T", bound="BaseDTO")
 
@@ -64,22 +65,26 @@ class BaseDTO:
                     kwargs[field_name] = element.get(attr_name)
                 continue
 
+            # Unwrap Optional/Union types to get the actual type
+            actual_type = cls._unwrap_optional(field_type)
+            
             # Try multiple name variations for XML elements
             xml_names = cls._get_xml_names(field_name, namespaces)
             value = None
 
             # Check if it's a List type
-            origin = get_origin(field_type)
+            origin = get_origin(actual_type)
             if origin is list or origin is List:
-                inner_type = get_args(field_type)[0]
+                inner_type = get_args(actual_type)[0]
+                inner_actual_type = cls._unwrap_optional(inner_type)
                 value = []
                 for xml_name in xml_names:
                     elements = cls._find_elements(element, xml_name, namespaces)
                     if elements:
-                        if hasattr(inner_type, 'from_xml'):
-                            value = [inner_type.from_xml(e, namespaces) for e in elements]
+                        if hasattr(inner_actual_type, 'from_xml'):
+                            value = [inner_actual_type.from_xml(e, namespaces) for e in elements]
                         else:
-                            value = [cls._parse_value(e.text, inner_type) for e in elements]
+                            value = [cls._parse_value(e.text, inner_actual_type) for e in elements]
                         break
                 if not value:
                     value = []
@@ -89,15 +94,37 @@ class BaseDTO:
                     child = cls._find_element(element, xml_name, namespaces)
                     if child is not None:
                         # Nested dataclass
-                        if hasattr(field_type, 'from_xml'):
-                            value = field_type.from_xml(child, namespaces)
+                        if hasattr(actual_type, 'from_xml'):
+                            value = actual_type.from_xml(child, namespaces)
                         else:
-                            value = cls._parse_value(child.text, field_type)
+                            value = cls._parse_value(child.text, actual_type)
                         break
 
             kwargs[field_name] = value
 
         return cls(**kwargs)
+
+    @classmethod
+    def _unwrap_optional(cls, field_type):
+        """
+        Unwrap Optional[T] or T | None to get the actual type T.
+        Returns the field_type unchanged if it's not Optional.
+        """
+        origin = get_origin(field_type)
+        args = get_args(field_type)
+        
+        # Handle Union types (including Optional which is Union[T, None])
+        if origin is Union or (hasattr(types, 'UnionType') and origin is types.UnionType):
+            # Filter out NoneType to get the actual type(s)
+            non_none_types = [arg for arg in args if arg is not type(None)]
+            if len(non_none_types) == 1:
+                return non_none_types[0]
+            elif len(non_none_types) > 1:
+                # Multiple non-None types in Union, return the first one
+                # or could raise an error
+                return non_none_types[0]
+        
+        return field_type
 
     @classmethod
     def _extract_all_namespaces(cls, element: ET.Element) -> dict:
