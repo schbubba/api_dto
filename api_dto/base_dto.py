@@ -9,7 +9,7 @@ T = TypeVar("T", bound="BaseDTO")
 class BaseDTO:
 
     @abstractmethod
-    def to_dict(self) -> dict:
+    def to_dict(self, expand_json_fields=False) -> dict:
         """Serialize DTO to dict"""
         raise NotImplementedError
 

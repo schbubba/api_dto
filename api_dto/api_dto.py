@@ -4,12 +4,49 @@ from typing import Literal, get_origin, List, Dict, Set, TypeVar, Union
 from enum import Enum
 import types
 from .sensitive_fields import SensitiveFields
+from .base_dto import BaseDTO
+import json
+import importlib
 
 T = TypeVar("T")
 
 _SERIALIZABLE_ADDED = "_serializable_added"
 _NULLABLE_ADDED = "_nullable_added"
 _IS_API_DTO = "_is_api_dto"
+
+_IS_STORED_AS_STRING = "_is_stored_as_string"
+
+class JsonFieldDescriptor:
+    def __init__(self, func):
+        self.func = func
+        self.is_stored_as_string = True
+        self.type = func.__annotations__.get("return")
+        self.name = func.__name__ 
+
+    def __set_name__(self, owner, name):
+        """Called automatically when the class is created."""
+        self.owner = owner
+        self.private_name = f"_{name}"
+
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self  # accessing the property on the class
+        # Return the underlying stored value
+        return getattr(instance, self.private_name, None)
+
+    def __set__(self, instance, value):
+        # Example conversion: store as string
+        if value is None:
+            setattr(instance, self.private_name, None)
+        else:
+            setattr(instance, self.private_name, value)
+
+    def __delete__(self, instance):
+        setattr(instance, self.private_name, None)
+
+
+def json_field(func=None, *, value=True):
+    return JsonFieldDescriptor(func)
 
 # ------------------------------
 # Core DTO decorator
@@ -51,50 +88,176 @@ def add_serializable(cls=None):
         cls.from_http_request = classmethod(_from_http_request)
         cls.to_json = _to_json
         cls.from_json = classmethod(_from_json)
+        cls._find_string_fields = _find_string_fields
         return cls
 
     return wrap if cls is None else wrap(cls)
 
+def _find_string_fields(self):
+    """Return {field_name: field_type} for all @store_as_string fields."""
+    result = {}
+    for name, attr in self.__class__.__dict__.items():
+        if isinstance(attr, JsonFieldDescriptor):
+            result[name] = attr.type
+    return result
 
-def _to_dict(self):
+
+def _to_dict(self, expand_json_fields=False):
+    """
+    Serialize DTO to dict.
+    
+    Args:
+        expand_json_fields: If True, @json_field decorated fields will be 
+                           serialized as nested dicts instead of JSON strings
+    """
+    import json
+
     try:
         data = asdict(self)
-        _warn_sensitive_fields(self, data)
+        
+        if not expand_json_fields:
+            string_fields = self._find_string_fields()
+
+            for field, _type in string_fields.items():
+                value = getattr(self, field)
+
+                if value is None:
+                    data[field] = None
+                else:
+                    # full nested object → dict → JSON string
+                    if hasattr(value, "to_dict"):
+                        nested_dict = value.to_dict(expand_json_fields=False)
+                    else:
+                        nested_dict = asdict(value)
+
+                    data[field] = json.dumps(nested_dict)
+        else:
+            # When expanding, just use the nested dict directly
+            string_fields = self._find_string_fields()
+            
+            for field, _type in string_fields.items():
+                value = getattr(self, field)
+
+                if value is None:
+                    data[field] = None
+                else:
+                    # Recursively expand nested objects
+                    if hasattr(value, "to_dict"):
+                        data[field] = value.to_dict(expand_json_fields=True)
+                    else:
+                        data[field] = asdict(value)
+
         return data
+
     except Exception as e:
-        print(f"Error deserializing DTO: {e}")
+        print(f"Error serializing DTO: {e}")
+        raise
 
 
-def _enum_hook(value, enum_type):
+def _from_dict(cls, data):
+    """
+    Deserialize DTO from dict.
+    Automatically detects whether @json_field values are JSON strings or dicts.
+    """
+    # make a copy
+    data = dict(data)
+
+    # find all @json_field fields
+    string_fields = {
+        name: attr.func.__annotations__.get("return")
+        for name, attr in cls.__dict__.items()
+        if hasattr(attr, "is_stored_as_string")
+    }
+
+    # Extract and deserialize @json_field fields separately
+    string_field_values = {}
+    for field_name, field_type in string_fields.items():
+        raw = data.pop(field_name, None)  # Remove from data
+        if raw is not None:
+            # Auto-detect: if it's a string, deserialize from JSON
+            # if it's already a dict, deserialize as nested object
+            if isinstance(raw, str):
+                # JSON string format (from database)
+                string_field_values[field_name] = _deserialize_string_field(raw, field_type)
+            elif isinstance(raw, dict):
+                # Already expanded dict format (from API/expanded to_dict)
+                if hasattr(field_type, 'from_dict'):
+                    string_field_values[field_name] = field_type.from_dict(raw)
+                else:
+                    string_field_values[field_name] = raw
+            else:
+                # Some other type, just pass it through
+                string_field_values[field_name] = raw
+
+    # Build type_hooks for enum types
+    type_hooks = {
+        t: _value_hook
+        for t in cls.__annotations__.values()
+        if isinstance(t, type) and issubclass(t, Enum)
+    }
+
+    # Create instance with dacite (without @json_field fields)
+    instance = from_dict(
+        cls,
+        data=data,
+        config=Config(type_hooks=type_hooks) if type_hooks else Config()
+    )
+
+    # Now manually set the @json_field fields
+    for field_name, value in string_field_values.items():
+        setattr(instance, field_name, value)
+
+    return instance
+
+def _value_hook(value, type):
     # dacite only calls this when enum_type is EXACT enum class
     if value is None:
         return None
 
-    # Try direct match first
-    try:
-        return enum_type(value)
-    except Exception:
-        pass
+    if issubclass(type, Enum):
+        # Try direct match first
+        try:
+            return type(value)
+        except Exception:
+            pass
 
-    # Try uppercase matching
+        # Try uppercase matching
+        if isinstance(value, str):
+            for e in type:
+                if e.name.lower() == value.lower():
+                    return e
+
+    if issubclass(type, BaseDTO):
+        # check if we have the decorator
+        getattr(type, _IS_STORED_AS_STRING, False)
+        new_value = json.loads(value)
+        return new_value
+    
+    return value
+
+
+
+def _deserialize_string_field(value, target_type):
+    """Recursively convert JSON strings into DTO objects."""
+    if value is None:
+        return None
+
     if isinstance(value, str):
-        for e in enum_type:
-            if e.name.lower() == value.lower():
-                return e
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
 
-    raise ValueError(f"Cannot map value {value!r} to enum {enum_type.__name__}")
-
-
-def _from_dict(cls, data):
-    return from_dict(
-        cls,
-        data=data,
-        config=Config(type_hooks={
-            cls_field_type: _enum_hook
-            for cls_field_type in cls.__annotations__.values()
-            if isinstance(cls_field_type, type) and issubclass(cls_field_type, Enum)
-        })
-    )
+        if isinstance(parsed, dict):
+            # recursively deserialize nested @store_as_string fields
+            return target_type.from_dict(parsed)
+        elif isinstance(parsed, str):
+            # nested string in string
+            return _deserialize_string_field(parsed, target_type)
+        else:
+            return parsed
+    else:
+        return value
 
 
 async def _from_http_request(cls, request):
@@ -116,8 +279,6 @@ def _from_json(cls, json_str: str):
     import json
     data = json.loads(json_str)
     return cls.from_dict(data)
-
-
 
 # ------------------------------
 # Nullable / optional fields
