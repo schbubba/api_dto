@@ -50,7 +50,9 @@ class BaseDTO:
             namespaces = cls._extract_all_namespaces(element)
 
         kwargs = {}
+        json_field_values = {}  # Store @json_field values separately
 
+        # Process regular dataclass fields
         for field in fields(cls):
             field_name = field.name
             field_type = field.type
@@ -102,7 +104,54 @@ class BaseDTO:
 
             kwargs[field_name] = value
 
-        return cls(**kwargs)
+        # Also process @json_field properties
+        for attr_name, attr_value in cls.__dict__.items():
+            # Check if it's a JsonFieldDescriptor (or whatever you named it)
+            if hasattr(attr_value, 'is_stored_as_string'):
+                field_type = attr_value.type
+                actual_type = cls._unwrap_optional(field_type)
+                
+                xml_names = cls._get_xml_names(attr_name, namespaces)
+                value = None
+
+                # Check if it's a List type
+                origin = get_origin(actual_type)
+                if origin is list or origin is List:
+                    inner_type = get_args(actual_type)[0]
+                    inner_actual_type = cls._unwrap_optional(inner_type)
+                    value = []
+                    for xml_name in xml_names:
+                        elements = cls._find_elements(element, xml_name, namespaces)
+                        if elements:
+                            if hasattr(inner_actual_type, 'from_xml'):
+                                value = [inner_actual_type.from_xml(e, namespaces) for e in elements]
+                            else:
+                                value = [cls._parse_value(e.text, inner_actual_type) for e in elements]
+                            break
+                    if not value:
+                        value = []
+                else:
+                    # Single element
+                    for xml_name in xml_names:
+                        child = cls._find_element(element, xml_name, namespaces)
+                        if child is not None:
+                            # Nested dataclass
+                            if hasattr(actual_type, 'from_xml'):
+                                value = actual_type.from_xml(child, namespaces)
+                            else:
+                                value = cls._parse_value(child.text, actual_type)
+                            break
+
+                json_field_values[attr_name] = value
+
+        # Create instance with regular fields
+        instance = cls(**kwargs)
+        
+        # Set @json_field properties after instantiation
+        for field_name, value in json_field_values.items():
+            setattr(instance, field_name, value)
+
+        return instance
 
     @classmethod
     def _unwrap_optional(cls, field_type):
