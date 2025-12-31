@@ -153,7 +153,6 @@ def _to_dict(self, expand_json_fields=False):
         print(f"Error serializing DTO: {e}")
         raise
 
-
 def _from_dict(cls, data):
     """
     Deserialize DTO from dict.
@@ -271,9 +270,9 @@ async def _from_http_request(cls, request):
 
     return cls.from_dict(data)
 
-def _to_json(self, indent=None) -> str:
+def _to_json(self, indent=None, expand_json_fields=False) -> str:
     import json
-    return json.dumps(self.to_dict(), indent=indent)
+    return json.dumps(self.to_dict(expand_json_fields=expand_json_fields), indent=indent)
 
 def _from_json(cls, json_str: str):
     import json
