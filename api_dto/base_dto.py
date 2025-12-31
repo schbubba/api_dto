@@ -26,7 +26,7 @@ class BaseDTO:
         """Deserialize DTO from http request"""
 
     @abstractmethod
-    def to_json(self) -> str:
+    def to_json(self, indent=None) -> str:
         """Encode to JSON string"""
 
     @classmethod

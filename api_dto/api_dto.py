@@ -271,9 +271,9 @@ async def _from_http_request(cls, request):
 
     return cls.from_dict(data)
 
-def _to_json(self) -> str:
+def _to_json(self, indent=None) -> str:
     import json
-    return json.dumps(self.to_dict())
+    return json.dumps(self.to_dict(), indent=indent)
 
 def _from_json(cls, json_str: str):
     import json
