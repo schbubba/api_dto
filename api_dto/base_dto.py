@@ -45,12 +45,24 @@ class BaseDTO:
     def from_xml(cls: Type[T], element: ET.Element, namespaces: dict = None) -> T:
         """
         Automatically deserialize XML element to dataclass instance.
+        Sets all XML attributes and child elements as object attributes,
+        even if they're not defined in the dataclass.
         """
         if namespaces is None:
             namespaces = cls._extract_all_namespaces(element)
 
         kwargs = {}
-        json_field_values = {}  # Store @json_field values separately
+        json_field_values = {}
+        extra_attributes = {}  # Attributes not in the dataclass definition
+        
+        # Get all defined field names for quick lookup
+        defined_fields = {f.name for f in fields(cls)}
+        
+        # Get all @json_field property names
+        json_field_names = {
+            attr_name for attr_name, attr_value in cls.__dict__.items()
+            if hasattr(attr_value, 'is_stored_as_string')
+        }
 
         # Process regular dataclass fields
         for field in fields(cls):
@@ -69,6 +81,12 @@ class BaseDTO:
 
             # Unwrap Optional/Union types to get the actual type
             actual_type = cls._unwrap_optional(field_type)
+            
+            # First, try to get value from XML attributes
+            attr_value = cls._get_attribute_value(element, field_name)
+            if attr_value is not None:
+                kwargs[field_name] = cls._parse_value(attr_value, actual_type)
+                continue
             
             # Try multiple name variations for XML elements
             xml_names = cls._get_xml_names(field_name, namespaces)
@@ -104,12 +122,17 @@ class BaseDTO:
 
             kwargs[field_name] = value
 
-        # Also process @json_field properties
+        # Process @json_field properties
         for attr_name, attr_value in cls.__dict__.items():
-            # Check if it's a JsonFieldDescriptor (or whatever you named it)
             if hasattr(attr_value, 'is_stored_as_string'):
                 field_type = attr_value.type
                 actual_type = cls._unwrap_optional(field_type)
+                
+                # First, try to get value from XML attributes
+                attr_val = cls._get_attribute_value(element, attr_name)
+                if attr_val is not None:
+                    json_field_values[attr_name] = cls._parse_value(attr_val, actual_type)
+                    continue
                 
                 xml_names = cls._get_xml_names(attr_name, namespaces)
                 value = None
@@ -151,7 +174,131 @@ class BaseDTO:
         for field_name, value in json_field_values.items():
             setattr(instance, field_name, value)
 
+        # Now process ALL XML attributes and set them dynamically
+        for attr_name, attr_value in element.attrib.items():
+            # Skip xmlns declarations
+            if attr_name == 'xmlns' or attr_name.startswith('xmlns:'):
+                continue
+            
+            # Convert attribute name to snake_case
+            snake_name = camel_to_snake(attr_name)
+            
+            # Only set if not already processed
+            if snake_name not in defined_fields and snake_name not in json_field_names:
+                # Try to parse as int, float, or keep as string
+                parsed_value = cls._auto_parse_value(attr_value)
+                setattr(instance, snake_name, parsed_value)
+
+        # Process ALL child elements and set them dynamically
+        for child in element:
+            local_name = cls._get_local_name(child.tag)
+            snake_name = camel_to_snake(local_name)
+            
+            # Only set if not already processed
+            if snake_name not in defined_fields and snake_name not in json_field_names:
+                # Check if there are multiple elements with this name
+                all_matching = [
+                    c for c in element 
+                    if cls._get_local_name(c.tag).lower() == local_name.lower()
+                ]
+                
+                if len(all_matching) > 1:
+                    # Multiple elements - create a list
+                    if not hasattr(instance, snake_name):
+                        value_list = []
+                        for elem in all_matching:
+                            if len(elem) > 0 or elem.attrib:
+                                # Has children or attributes - recursively parse
+                                value_list.append(cls._parse_element_dynamically(elem, namespaces))
+                            else:
+                                # Just text content
+                                value_list.append(cls._auto_parse_value(elem.text))
+                        setattr(instance, snake_name, value_list)
+                else:
+                    # Single element
+                    if len(child) > 0 or child.attrib:
+                        # Has children or attributes - recursively parse
+                        value = cls._parse_element_dynamically(child, namespaces)
+                    else:
+                        # Just text content
+                        value = cls._auto_parse_value(child.text)
+                    setattr(instance, snake_name, value)
+
         return instance
+
+    @classmethod
+    def _parse_element_dynamically(cls, element: ET.Element, namespaces: dict) -> dict:
+        """
+        Parse an XML element into a dictionary when we don't have a defined DTO for it.
+        """
+        result = {}
+        
+        # Add all attributes
+        for attr_name, attr_value in element.attrib.items():
+            if attr_name != 'xmlns' and not attr_name.startswith('xmlns:'):
+                snake_name = camel_to_snake(attr_name)
+                result[snake_name] = cls._auto_parse_value(attr_value)
+        
+        # Add child elements
+        for child in element:
+            local_name = cls._get_local_name(child.tag)
+            snake_name = camel_to_snake(local_name)
+            
+            # Check if there are multiple elements with this name
+            all_matching = [
+                c for c in element 
+                if cls._get_local_name(c.tag).lower() == local_name.lower()
+            ]
+            
+            if len(all_matching) > 1:
+                if snake_name not in result:
+                    result[snake_name] = []
+                if len(child) > 0 or child.attrib:
+                    result[snake_name].append(cls._parse_element_dynamically(child, namespaces))
+                else:
+                    result[snake_name].append(cls._auto_parse_value(child.text))
+            else:
+                if len(child) > 0 or child.attrib:
+                    result[snake_name] = cls._parse_element_dynamically(child, namespaces)
+                else:
+                    result[snake_name] = cls._auto_parse_value(child.text)
+        
+        # If no children or attributes, just return the text
+        if not result and element.text:
+            return cls._auto_parse_value(element.text)
+        
+        return result
+
+    @classmethod
+    def _auto_parse_value(cls, text: str) -> Any:
+        """
+        Automatically parse a string value to int, float, bool, or keep as string.
+        """
+        if text is None:
+            return None
+        
+        text = text.strip()
+        if not text:
+            return None
+        
+        # Try bool
+        if text.lower() in ('true', 'false'):
+            return text.lower() == 'true'
+        
+        # Try int
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        
+        # Try float
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        
+        # Keep as string
+        return text
 
     @classmethod
     def _unwrap_optional(cls, field_type):
@@ -218,10 +365,7 @@ class BaseDTO:
     @classmethod
     def _find_element(cls, element: ET.Element, name: str, namespaces: dict) -> Optional[ET.Element]:
         """Find a single child element, handling namespaces properly"""
-        # Build reverse mapping for lookup
-        uri_to_prefix = {v: k for k, v in namespaces.items()}
-
-        # Method 1: Try with namespace prefix
+        # Method 1: Try with namespace prefix if provided
         if ':' in name:
             prefix, local = name.split(':', 1)
             if prefix in namespaces:
@@ -242,37 +386,26 @@ class BaseDTO:
         if child is not None:
             return child
 
-        # Method 4: Brute force - check all children by local name only
+        # Method 4: Search across ALL namespaces for matching local name
+        # This allows product_cap to match sec:ProductCap, pnpx:ProductCap, etc.
+        camel_name = snake_to_camel(name)
         for child in element:
-            # Strip namespace from tag
-            tag = child.tag
-            if '}' in tag:
-                tag = tag.split('}', 1)[1]
-
+            local_name = cls._get_local_name(child.tag)
+            
             # Try exact match
-            if tag == name:
+            if local_name == camel_name or local_name == name:
                 return child
-
+            
             # Try case-insensitive match
-            if tag.lower() == name.lower():
+            if local_name.lower() == camel_name.lower() or local_name.lower() == name.lower():
                 return child
-
-            # Try matching against the field name variations
-            # For fields like pnpx_x_compatible_id, check if tag matches X_compatibleId
-            if '_' in name:
-                parts = name.split('_')
-                # Try with first part as namespace
-                if len(parts) > 1:
-                    potential_local = snake_to_camel('_'.join(parts[1:]))
-                    if tag == potential_local:
-                        return child
 
         return None
 
     @classmethod
     def _find_elements(cls, element: ET.Element, name: str, namespaces: dict) -> List[ET.Element]:
         """Find multiple child elements, handling namespaces properly"""
-        # Method 1: Try with namespace prefix
+        # Method 1: Try with namespace prefix if provided
         if ':' in name:
             prefix, local = name.split(':', 1)
             if prefix in namespaces:
@@ -293,79 +426,80 @@ class BaseDTO:
         if children:
             return children
 
-        # Method 4: Brute force - check all children by local name
+        # Method 4: Search across ALL namespaces for matching local name
+        camel_name = snake_to_camel(name)
         results = []
         for child in element:
-            tag = child.tag
-            if '}' in tag:
-                tag = tag.split('}', 1)[1]
-
-            # Try exact match
-            if tag == name:
+            local_name = cls._get_local_name(child.tag)
+            
+            if local_name == camel_name or local_name == name:
                 results.append(child)
-                continue
-
-            # Try case-insensitive
-            if tag.lower() == name.lower():
+            elif local_name.lower() == camel_name.lower() or local_name.lower() == name.lower():
                 results.append(child)
-                continue
-
-            # Try matching field name variations
-            if '_' in name:
-                parts = name.split('_')
-                if len(parts) > 1:
-                    potential_local = snake_to_camel('_'.join(parts[1:]))
-                    if tag == potential_local:
-                        results.append(child)
 
         return results
 
     @classmethod
+    def _get_local_name(cls, tag: str) -> str:
+        """Extract local name from a tag, stripping namespace"""
+        if '}' in tag:
+            return tag.split('}', 1)[1]
+        return tag
+
+    @classmethod
+    def _get_attribute_value(cls, element: ET.Element, field_name: str) -> Optional[str]:
+        """
+        Try to get value from element attributes.
+        Tries multiple name variations (camelCase, snake_case, etc.)
+        """
+        # Try direct attribute name
+        if field_name in element.attrib:
+            return element.attrib[field_name]
+        
+        # Try camelCase
+        camel = snake_to_camel(field_name)
+        if camel in element.attrib:
+            return element.attrib[camel]
+        
+        # Try lowercase
+        lower = field_name.lower()
+        if lower in element.attrib:
+            return element.attrib[lower]
+        
+        # Try case-insensitive search
+        for attr_name, attr_value in element.attrib.items():
+            if attr_name.lower() == lower:
+                return attr_value
+        
+        return None
+
+    @classmethod
     def _get_xml_names(cls, field_name: str, namespaces: dict) -> List[str]:
-        """Generate possible XML element names for a field"""
+        """
+        Generate possible XML element names for a field.
+        Now returns just camelCase conversions and lets _find_element 
+        search across all namespaces.
+        """
         names = []
 
-        # Handle fields with namespace prefixes (e.g., sec_product_cap -> ProductCap)
-        # We'll search by local name only since namespace might vary
-        parts = field_name.split('_')
-
-        if len(parts) > 1:
-            # Check if first part might be a namespace prefix
-            potential_prefix = parts[0]
-            if potential_prefix in namespaces:
-                # It's a known namespace prefix
-                local_name = snake_to_camel('_'.join(parts[1:]))
-                names.append(f"{potential_prefix}:{local_name}")
-                # Also add just the local name for brute-force matching
-                names.append(local_name)
-            else:
-                # Not a namespace, try other combinations
-                for i in range(1, len(parts)):
-                    potential_prefix = '_'.join(parts[:i])
-                    if potential_prefix in namespaces:
-                        local_name = snake_to_camel('_'.join(parts[i:]))
-                        names.append(f"{potential_prefix}:{local_name}")
-                        names.append(local_name)
-
-        # Standard camelCase conversion (full field name)
+        # Standard camelCase conversion
         camel = snake_to_camel(field_name)
         names.append(camel)
-
-        # For fields like pnpx_x_compatible_id, also try X_compatibleId
-        if field_name.count('_') > 1:
-            # Try converting just the part after first underscore
-            after_first = '_'.join(field_name.split('_')[1:])
-            names.append(snake_to_camel(after_first))
-            # Also try with underscores preserved for X_ prefixes
-            if after_first.startswith('x_'):
-                names.append('X_' + snake_to_camel(after_first[2:]))
 
         # Try exact uppercase matches (for UDN, SCPDURL, etc.)
         upper = field_name.upper().replace('_', '')
         if upper != camel.upper():
             names.append(upper)
 
-        # Try the original field name
+        # Also try variations with different capitalization
+        # For example: x_compatible_id -> X_compatibleId, XCompatibleId, etc.
+        if field_name.startswith('x_'):
+            # Try X_camelCase
+            names.append('X_' + snake_to_camel(field_name[2:]))
+            # Try XCamelCase
+            names.append('X' + snake_to_camel(field_name[2:]).capitalize())
+
+        # Try the original field name as last resort
         names.append(field_name)
 
         return names
@@ -397,7 +531,19 @@ def snake_to_camel(name: str) -> str:
     components = name.split('_')
     return components[0] + ''.join(x.title() for x in components[1:])
 
-# Example usage with your models
+def camel_to_snake(name: str) -> str:
+    """Convert camelCase to snake_case"""
+    result = []
+    for i, char in enumerate(name):
+        if char.isupper() and i > 0:
+            # Don't add underscore if previous char was also uppercase (e.g., "URLPath")
+            if i + 1 < len(name) and name[i + 1].islower():
+                result.append('_')
+            elif not name[i - 1].isupper():
+                result.append('_')
+        result.append(char.lower())
+    return ''.join(result)
+
 # Debug helper
 def debug_element(element: ET.Element, indent=0):
     """Print element structure for debugging"""
