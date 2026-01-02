@@ -34,196 +34,143 @@ class BaseDTO:
     def from_json(cls, json_str: str):
         """Decode from JSON string"""
 
-
     @classmethod
-    def from_xml_string(cls: Type[T], xml: str, namespaces: dict = None) -> T:
-        root_element = ET.fromstring(xml)
-
-        return cls.from_xml(root_element, namespaces)
-
-    @classmethod
-    def from_xml(cls: Type[T], element: ET.Element, namespaces: dict = None) -> T:
+    def from_xml(cls, xml: str):
         """
-        Automatically deserialize XML element to dataclass instance.
+        Docstring for from_xml
+        
+        :param obj: Description
+        :param xml: Description
+        :type xml: str
         """
-        import re
-        from typing import get_args
-        from dataclasses import fields, is_dataclass
-        
-        def strip_ns(tag: str) -> str:
-            """Remove namespace from an XML tag."""
-            return tag.split("}", 1)[1] if "}" in tag else tag
-
-        def camel_to_snake(name: str) -> str:
-            s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
-            return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
-
-        def is_complex(elem):
-            return len(list(elem)) > 0
-        
-        def auto_parse_value(text: str, target_type: Type = None) -> Any:
-            """
-            Automatically parse a string value to the target type or infer type.
-            """
-            if text is None:
-                return None
-            
-            text = text.strip()
-            if not text:
-                return None
-            
-            # If we have a target type, use it
-            if target_type:
-                origin = get_origin(target_type)
-                if origin is Union:
-                    non_none = [t for t in get_args(target_type) if t is not type(None)]
-                    target_type = non_none[0] if non_none else None
-                
-                if target_type == int:
-                    return int(text)
-                elif target_type == float:
-                    return float(text)
-                elif target_type == bool:
-                    return text.lower() in ('true', '1', 'yes')
-                elif target_type == str:
-                    return text
-            
-            # Otherwise, infer the type
-            # Try bool
-            if text.lower() in ('true', 'false'):
-                return text.lower() == 'true'
-            
-            # Try int
-            try:
-                return int(text)
-            except ValueError:
-                pass
-            
-            # Try float
-            try:
-                return float(text)
-            except ValueError:
-                pass
-            
-            # Keep as string
-            return text
-
-        def set_properties(obj, elem: ET.Element, is_root_call: bool = True):
-            # Only search for the object by name on the initial call
-            if is_root_call:
-                xml_obj = elem.findall(f".//{{*}}{type(obj).__name__.lower()}")
-                elements_to_iterate = xml_obj if xml_obj else [elem]
-            else:
-                elements_to_iterate = [elem]
-
-            # Get annotations (works for both dataclasses and regular classes)
-            annotations = getattr(type(obj), "__annotations__", {})
-            
-            # Get dataclass fields if this is a dataclass
-            dataclass_fields = {}
-            if is_dataclass(type(obj)):
-                dataclass_fields = {f.name: f.type for f in fields(type(obj))}
-
-            for el in elements_to_iterate:
-                for child in el:
-                    tag = camel_to_snake(strip_ns(child.tag))
-
-                    # Get the expected type for this field (from dataclass or annotations)
-                    expected_type = dataclass_fields.get(tag) or annotations.get(tag, None)
-
-                    # --- simple scalar ---
-                    if not is_complex(child):
-                        value = auto_parse_value(child.text, expected_type)
-                        setattr(obj, tag, value)
-                        continue
-
-                    # --- complex object ---
-                    attr_type = expected_type
-                    current_val = getattr(obj, tag, None)
-                    origin = getattr(attr_type, "__origin__", None) if attr_type else None
-
-                    # handle Optional[T]
-                    if origin is Union:
-                        non_none = [t for t in get_args(attr_type) if t is not type(None)]
-                        attr_type = non_none[0] if non_none else None
-                        origin = getattr(attr_type, "__origin__", None)
-
-                    # --- LIST ---
-                    if origin in (list, List):
-                        item_type = get_args(attr_type)[0] if attr_type else None
-                        if current_val is None:
-                            current_val = []
-                            setattr(obj, tag, current_val)
-
-                        # Check if 'child' is the list container or an individual item
-                        if strip_ns(child.tag).lower() == tag.rstrip('s').lower() or len(list(child)) == 0 or strip_ns(list(child)[0].tag).lower() != tag.rstrip('s').lower():
-                            # 'child' IS the list item itself
-                            item_obj = item_type() if item_type else cls._create_dynamic_obj()
-                            current_val.append(item_obj)
-                            
-                            # map attributes
-                            for key in child.attrib.keys():
-                                attr_tag = camel_to_snake(strip_ns(key))
-                                attr_value = child.attrib[key]
-                                # Get type hint for this attribute if item_type has annotations
-                                item_annotations = getattr(item_type, "__annotations__", {}) if item_type else {}
-                                attr_expected_type = item_annotations.get(attr_tag, None)
-                                setattr(item_obj, attr_tag, auto_parse_value(attr_value, attr_expected_type))
-                            
-                            # map child elements
-                            for field in child:
-                                field_tag = camel_to_snake(strip_ns(field.tag))
-                                if is_complex(field):
-                                    sub_attr_type = getattr(item_type, "__annotations__", {}).get(field_tag, None) if item_type else None
-                                    sub_obj = sub_attr_type() if sub_attr_type else cls._create_dynamic_obj()
-                                    setattr(item_obj, field_tag, sub_obj)
-                                    set_properties(sub_obj, field, is_root_call=False)
-                                else:
-                                    # Get type hint for this field
-                                    item_annotations = getattr(item_type, "__annotations__", {}) if item_type else {}
-                                    field_expected_type = item_annotations.get(field_tag, None)
-                                    setattr(item_obj, field_tag, auto_parse_value(field.text, field_expected_type))
-                        else:
-                            # 'child' is the container
-                            for list_item_elem in child:
-                                item_obj = item_type() if item_type else cls._create_dynamic_obj()
-                                current_val.append(item_obj)
-
-                                # map attributes
-                                for key in list_item_elem.attrib.keys():
-                                    attr_tag = camel_to_snake(strip_ns(key))
-                                    attr_value = list_item_elem.attrib[key]
-                                    item_annotations = getattr(item_type, "__annotations__", {}) if item_type else {}
-                                    attr_expected_type = item_annotations.get(attr_tag, None)
-                                    setattr(item_obj, attr_tag, auto_parse_value(attr_value, attr_expected_type))
-
-                                # map child elements
-                                for field in list_item_elem:
-                                    field_tag = camel_to_snake(strip_ns(field.tag))
-                                    if is_complex(field):
-                                        sub_attr_type = getattr(item_type, "__annotations__", {}).get(field_tag, None) if item_type else None
-                                        sub_obj = sub_attr_type() if sub_attr_type else cls._create_dynamic_obj()
-                                        setattr(item_obj, field_tag, sub_obj)
-                                        set_properties(sub_obj, field, is_root_call=False)
-                                    else:
-                                        item_annotations = getattr(item_type, "__annotations__", {}) if item_type else {}
-                                        field_expected_type = item_annotations.get(field_tag, None)
-                                        setattr(item_obj, field_tag, auto_parse_value(field.text, field_expected_type))
-                        continue
-
-                    # --- SINGLE COMPLEX OBJECT ---
-                    if current_val is None:
-                        sub_obj = attr_type() if attr_type else cls._create_dynamic_obj()
-                        setattr(obj, tag, sub_obj)
-                    else:
-                        sub_obj = current_val
-
-                    set_properties(sub_obj, child, is_root_call=False)
-
-        # Create instance and populate it
         obj = cls()
-        set_properties(obj, element)
+        root = ET.fromstring(xml)
+        source_element = cls._xml_get_source_element(root)
+    
+        obj._xml_map_element(obj, source_element)
+
         return obj
+
+    def _xml_map_element(self, obj, element: ET.Element):
+        """Map all child elements and attributes to the object"""
+        # Map attributes first
+        for attr_name, attr_value in element.attrib.items():
+            if not attr_name.startswith('xmlns'):
+                self._xml_set_property(obj, attr_name, attr_value)
+        
+        # Get object's type annotations
+        annotations = getattr(type(obj), "__annotations__", {})
+        
+        # Map child elements
+        for child in element:
+            tag = self._camel_to_snake(self._strip_namespace(child.tag))
+            
+            # Get the expected type for this property
+            expected_type = annotations.get(tag, None)
+            origin = get_origin(expected_type) if expected_type else None
+            
+            # Handle Optional[T]
+            if origin is Union:
+                non_none = [t for t in get_args(expected_type) if t is not type(None)]
+                expected_type = non_none[0] if non_none else None
+                origin = get_origin(expected_type)
+            
+            # Determine how to handle this element
+            if origin in (list, List):
+                self._xml_handle_list_element(obj, tag, child, expected_type)
+            elif self._xml_is_scalar(child):
+                self._xml_handle_scalar_element(obj, tag, child, expected_type)
+            else:
+                self._xml_handle_complex_element(obj, tag, child, expected_type)
+
+    def _xml_set_property(self, obj, name, value):
+        property_name = self._camel_to_snake(self._strip_namespace(name))
+        setattr(obj, property_name, value)
+
+    def _xml_is_scalar(self, element: ET.Element) -> bool:
+        """Determine if the element is a scalar value"""
+        return len(list(element)) == 0 and len(element.attrib) == 0
+
+    def _xml_is_complex(self, element: ET.Element) -> bool:
+        """Determine if the element is a complex type"""
+        return not self._xml_is_scalar(element)
+
+    def _xml_is_list(self, obj, tag: str, element: ET.Element) -> bool:
+        """
+        Determine if the element is a list container or list item.
+        Returns True if element is a list item (not the container).
+        
+        :param obj: The parent object
+        :param tag: The property name on the parent object
+        :param element: The XML element to check
+        :return: True if element is a list item, False if it's a container
+        :rtype: bool
+        """
+        child_elements = list(element)
+        
+        # If element has no children, it's a list item
+        if len(child_elements) == 0:
+            return True
+        
+        # If the element tag matches the singular form of the property name,
+        # then this element IS the list item itself
+        element_tag = self._strip_namespace(element.tag).lower()
+        singular_tag = tag.rstrip('s').lower()
+        
+        if element_tag == singular_tag:
+            return True
+        
+        # Otherwise, it's a container
+        return False
+
+    def _xml_auto_parse(self, text: str, target_type: Type = None) -> Any:
+        """Parse text to appropriate type"""
+        if text is None:
+            return None
+        
+        # If we have a target type, use it
+        if target_type:
+            if target_type == int:
+                return int(text)
+            elif target_type == float:
+                return float(text)
+            elif target_type == bool:
+                return text.lower() in ('true', '1', 'yes')
+            elif target_type == str:
+                return text
+        
+        # Auto-detect type
+        if text.lower() in ('true', 'false'):
+            return text.lower() == 'true'
+        
+        try:
+            return int(text)
+        except ValueError:
+            pass
+        
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        
+        return text
+
+    @classmethod
+    def _xml_get_source_element(cls, root: ET.Element) -> ET.Element:
+        """Get the source element - either root itself or first child"""
+        children = list(root)
+        
+        # Try to find element matching class name
+        found = root.find(f"{{*}}{cls.__name__.lower()}")
+        if found is not None:
+            return found
+        
+        found = root.find(f"{{*}}{cls.__name__}")
+        if found is not None:
+            return found
+        
+        # Fallback to first child or root
+        return children[0] if len(children) > 0 else root
 
     @classmethod
     def _create_dynamic_obj(cls):
@@ -231,48 +178,101 @@ class BaseDTO:
         class DynamicDTO(BaseDTO): pass
         return DynamicDTO()
 
-    @classmethod
-    def _parse_element_dynamically(cls, element: ET.Element, namespaces: dict) -> dict:
-        """
-        Parse an XML element into a dictionary when we don't have a defined DTO for it.
-        """
-        result = {}
+    def _xml_handle_scalar_element(self, obj, tag, element: ET.Element, expected_type=None):
+        """Handle simple scalar values"""
+        value = element.text.strip() if element.text else None
+        parsed_value = self._xml_auto_parse(value, expected_type)
+        self._xml_set_property(obj, tag, parsed_value)
+
+    def _xml_handle_complex_element(self, obj, tag, element: ET.Element, expected_type=None):
+        """Handle complex nested objects"""
+        # Create the nested object
+        nested_obj = expected_type() if expected_type else self._xml_get_dto()
+        self._xml_set_property(obj, tag, nested_obj)
         
-        # Add all attributes
-        for attr_name, attr_value in element.attrib.items():
-            if attr_name != 'xmlns' and not attr_name.startswith('xmlns:'):
-                snake_name = camel_to_snake(attr_name)
-                result[snake_name] = cls._auto_parse_value(attr_value)
+        # Recursively map the element to the nested object
+        self._xml_map_element(nested_obj, element)
+
+    def _xml_handle_list_element(self, obj, tag, element: ET.Element, list_type):
+        """Handle list elements"""
+        item_type = get_args(list_type)[0] if list_type else None
         
-        # Add child elements
-        for child in element:
-            local_name = cls._get_local_name(child.tag)
-            snake_name = camel_to_snake(local_name)
+        # Get or create the list
+        current_list = getattr(obj, tag, None)
+        if current_list is None:
+            current_list = []
+            self._xml_set_property(obj, tag, current_list)
+        
+        child_elements = list(element)
+        
+        # Check if element is the list item or the container
+        if self._xml_is_list(obj, tag, element):
+            # Element IS the list item
+            item_obj = item_type() if item_type else self._xml_get_dto()
+            current_list.append(item_obj)
             
-            # Check if there are multiple elements with this name
-            all_matching = [
-                c for c in element 
-                if cls._get_local_name(c.tag).lower() == local_name.lower()
-            ]
+            # Map attributes
+            for attr_name, attr_value in element.attrib.items():
+                self._xml_set_property(item_obj, attr_name, attr_value)
             
-            if len(all_matching) > 1:
-                if snake_name not in result:
-                    result[snake_name] = []
-                if len(child) > 0 or child.attrib:
-                    result[snake_name].append(cls._parse_element_dynamically(child, namespaces))
+            # Map child elements
+            for child in child_elements:
+                child_tag = self._camel_to_snake(self._strip_namespace(child.tag))
+                if self._xml_is_scalar(child):
+                    self._xml_handle_scalar_element(item_obj, child_tag, child)
                 else:
-                    result[snake_name].append(cls._auto_parse_value(child.text))
-            else:
-                if len(child) > 0 or child.attrib:
-                    result[snake_name] = cls._parse_element_dynamically(child, namespaces)
-                else:
-                    result[snake_name] = cls._auto_parse_value(child.text)
+                    self._xml_handle_complex_element(item_obj, child_tag, child)
+        else:
+            # Element is the container, iterate its children
+            for list_item_elem in child_elements:
+                item_obj = item_type() if item_type else self._xml_get_dto()
+                current_list.append(item_obj)
+                
+                # Map attributes
+                for attr_name, attr_value in list_item_elem.attrib.items():
+                    self._xml_set_property(item_obj, attr_name, attr_value)
+                
+                # Map child elements
+                for child in list_item_elem:
+                    child_tag = self._camel_to_snake(self._strip_namespace(child.tag))
+                    if self._xml_is_scalar(child):
+                        self._xml_handle_scalar_element(item_obj, child_tag, child)
+                    else:
+                        self._xml_handle_complex_element(item_obj, child_tag, child)
+
+    def _xml_get_dto(self):
+        """
+        Used to get a BaseDTO object.
+        if the source element has complex types 
+        but the target DTO doesn't contain a property for it
+        to map to, created an empty DTO
         
-        # If no children or attributes, just return the text
-        if not result and element.text:
-            return cls._auto_parse_value(element.text)
-        
-        return result
+        :param value: Description
+        """
+        class o(BaseDTO): pass
+        return o()
+
+    def _strip_namespace(self, tag: str) -> str:
+        """Remove namespace from an XML tag."""
+        return tag.split("}", 1)[1] if "}" in tag else tag
+
+    def _snake_to_camel(self, name: str) -> str:
+        """Convert snake_case to camelCase for XML matching"""
+        components = name.split('_')
+        return components[0] + ''.join(x.title() for x in components[1:])
+
+    def _camel_to_snake(self, name: str) -> str:
+        """Convert camelCase to snake_case"""
+        result = []
+        for i, char in enumerate(name):
+            if char.isupper() and i > 0:
+                # Don't add underscore if previous char was also uppercase (e.g., "URLPath")
+                if i + 1 < len(name) and name[i + 1].islower():
+                    result.append('_')
+                elif not name[i - 1].isupper():
+                    result.append('_')
+            result.append(char.lower())
+        return ''.join(result)
 
     @classmethod
     def _auto_parse_value(cls, text: str) -> Any:
