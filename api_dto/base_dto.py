@@ -2,6 +2,7 @@ from abc import abstractmethod
 
 import types
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from dataclasses import fields
 from enum import Enum
 from typing import Optional, Any, List, TypeVar, Type, Union, get_args, get_origin
@@ -280,6 +281,15 @@ class BaseDTO:
                 if v in ("true", "1", "yes", "on"): return True
                 if v in ("false", "0", "no", "off"): return False
             return bool(value)
+
+        # ---- DATETIME ----
+        if expected_type is datetime:
+            if isinstance(value, str):
+                try:
+                    return datetime.fromisoformat(value)
+                except Exception:
+                    pass  # fallback to original string
+            return value
 
         # ---- ENUM ----
         if isinstance(expected_type, type) and issubclass(expected_type, Enum):
