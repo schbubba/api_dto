@@ -208,30 +208,41 @@ def _from_dict(cls, data):
 
     return instance
 
-def _value_hook(value, type):
-    # dacite only calls this when enum_type is EXACT enum class
+def _value_hook(value, type_):
+
+    # None is always allowed
     if value is None:
         return None
 
-    if issubclass(type, Enum):
-        # Try direct match first
+    # -------- INT CASTING SUPPORT --------
+    if type_ is int:
         try:
-            return type(value)
+            return int(value)
+        except (ValueError, TypeError):
+            return value  # fallback without breaking
+    # -------------------------------------
+
+    # Enum support
+    if isinstance(type_, type) and issubclass(type_, Enum):
+        # Try direct match
+        try:
+            return type_(value)
         except Exception:
             pass
 
-        # Try uppercase matching
+        # Try name-case-insensitive match
         if isinstance(value, str):
-            for e in type:
-                if e.name.lower() == value.lower():
+            lname = value.lower()
+            for e in type_:
+                if e.name.lower() == lname:
                     return e
 
-    if issubclass(type, BaseDTO):
-        # check if we have the decorator
-        getattr(type, _IS_STORED_AS_STRING, False)
-        new_value = json.loads(value)
-        return new_value
-    
+    # Nested DTO support
+    if isinstance(type_, type) and issubclass(type_, BaseDTO):
+        # JSON-deserialized DTO inside string field
+        json_value = json.loads(value)
+        return json_value
+
     return value
 
 
