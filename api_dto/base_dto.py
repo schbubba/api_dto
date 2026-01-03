@@ -3,6 +3,7 @@ from abc import abstractmethod
 import types
 import xml.etree.ElementTree as ET
 from dataclasses import fields
+from enum import Enum
 from typing import Optional, Any, List, TypeVar, Type, Union, get_args, get_origin
 
 T = TypeVar("T", bound="BaseDTO")
