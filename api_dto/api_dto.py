@@ -188,12 +188,20 @@ def _from_dict(cls, data):
                 # Some other type, just pass it through
                 string_field_values[field_name] = raw
 
-    # Build type_hooks for enum types
+    def int_cast(value):
+        if value is None:
+            return None
+        return int(value)
+
+
     type_hooks = {
-        t: _value_hook
-        for t in cls.__annotations__.values()
-        if isinstance(t, type) and issubclass(t, Enum)
+        int: int_cast
     }
+
+    # Add enum hooks
+    for t in cls.__annotations__.values():
+        if isinstance(t, type) and issubclass(t, Enum):
+            type_hooks[t] = _value_hook
 
     # Create instance with dacite (without @json_field fields)
     instance = from_dict(
