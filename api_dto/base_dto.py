@@ -85,6 +85,12 @@ class BaseDTO:
 
     def _xml_set_property(self, obj, name, value):
         property_name = self._camel_to_snake(self._strip_namespace(name))
+        annotations = getattr(obj.__class__, "__annotations__", {})
+
+        if property_name in annotations:
+            expected_type = annotations[property_name]
+            value = self._coerce_value(expected_type, value)
+
         setattr(obj, property_name, value)
 
     def _xml_is_scalar(self, element: ET.Element) -> bool:
@@ -239,6 +245,58 @@ class BaseDTO:
                         self._xml_handle_scalar_element(item_obj, child_tag, child)
                     else:
                         self._xml_handle_complex_element(item_obj, child_tag, child)
+
+    def _coerce_value(self, expected_type, value):
+        # Null stays null
+        if value is None:
+            return None
+
+        origin = get_origin(expected_type)
+        args = get_args(expected_type)
+
+        # Handle Optional / Union[T, None]
+        if origin is Union or origin is None:
+            if args:
+                # strip NoneType if present
+                non_none = [t for t in args if t is not type(None)]
+                if non_none:
+                    expected_type = non_none[0]
+
+        # ---- INT ----
+        if expected_type is int:
+            try: return int(value)
+            except: return value
+
+        # ---- FLOAT ----
+        if expected_type is float:
+            try: return float(value)
+            except: return value
+
+        # ---- BOOL ----
+        if expected_type is bool:
+            if isinstance(value, str):
+                v = value.strip().lower()
+                if v in ("true", "1", "yes", "on"): return True
+                if v in ("false", "0", "no", "off"): return False
+            return bool(value)
+
+        # ---- ENUM ----
+        if isinstance(expected_type, type) and issubclass(expected_type, Enum):
+            # Try direct enum(value)
+            try:
+                return expected_type(value)
+            except:
+                pass
+
+            # Case-insensitive match to enum name
+            if isinstance(value, str):
+                v = value.lower()
+                for e in expected_type:
+                    if e.name.lower() == v:
+                        return e
+
+        # Default: leave as string
+        return value
 
     def _xml_get_dto(self):
         """
