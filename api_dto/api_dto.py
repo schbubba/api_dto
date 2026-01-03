@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field, asdict, is_dataclass
 from dacite import from_dict, Config
+from datetime import datetime
 from typing import Literal, get_origin, List, Dict, Set, TypeVar, Union
 from enum import Enum
 import types
@@ -193,9 +194,20 @@ def _from_dict(cls, data):
             return None
         return int(value)
 
+    def datetime_cast(value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                pass
+        return value
+
 
     type_hooks = {
-        int: int_cast
+        int: int_cast,
+        datetime: datetime_cast
     }
 
     # Add enum hooks
