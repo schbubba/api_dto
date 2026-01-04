@@ -8,6 +8,8 @@ from .sensitive_fields import SensitiveFields
 from .base_dto import BaseDTO
 import json
 import importlib
+from dataclasses_json import dataclass_json
+
 
 T = TypeVar("T")
 
@@ -70,6 +72,7 @@ def api_dto(cls=None, *, optional=True, serializable=True, auto_collections=True
                 cls = dataclass()(cls=cls)
 
             if serializable and not has_serialization:
+                cls = dataclass_json()(cls)
                 cls = add_serializable()(cls)
             
             setattr(cls, _IS_API_DTO, True)
