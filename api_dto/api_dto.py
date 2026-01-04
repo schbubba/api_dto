@@ -73,7 +73,7 @@ def api_dto(cls=None, *, optional=True, serializable=True, auto_collections=True
 
             if serializable and not has_serialization:
                 cls = dataclass_json()(cls)
-                # cls = add_serializable()(cls)
+                cls = add_serializable()(cls)
             
             setattr(cls, _IS_API_DTO, True)
 
