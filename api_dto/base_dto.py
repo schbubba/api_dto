@@ -10,6 +10,7 @@ from typing import Optional, Any, List, TypeVar, Type, Union, get_args, get_orig
 T = TypeVar("T", bound="BaseDTO")
 
 class BaseDTO:
+    _namespaces = {}
 
     @abstractmethod
     def to_dict(self, expand_json_fields=False) -> dict:
@@ -52,6 +53,12 @@ class BaseDTO:
         obj._xml_map_element(obj, source_element)
 
         return obj
+
+    def _load_namespaces_from_xml(self, xml: str):
+        for event, elem in ET.iterparse(io.BytesIO(xml.encode('utf-8')), events=['start-ns']):
+            prefix, uri = elem
+            print(  f"Registering namespace: prefix='{prefix}', uri='{uri}'"  )
+            self._namespaces[prefix] = uri
 
     def _xml_map_element(self, obj, element: ET.Element):
         """Map all child elements and attributes to the object"""

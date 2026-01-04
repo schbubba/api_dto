@@ -97,6 +97,7 @@ def add_serializable(cls=None):
 
     return wrap if cls is None else wrap(cls)
 
+
 def _find_string_fields(self):
     """Return {field_name: field_type} for all @store_as_string fields."""
     result = {}
