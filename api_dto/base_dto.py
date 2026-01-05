@@ -1,5 +1,5 @@
 from abc import abstractmethod
-
+import io
 import types
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -174,18 +174,16 @@ class BaseDTO:
     def _xml_get_source_element(cls, root: ET.Element) -> ET.Element:
         """Get the source element - either root itself or first child"""
         children = list(root)
+        source_element = root.find(f"{{*}}{cls.__name__.lower()}")
         
-        # Try to find element matching class name
-        found = root.find(f"{{*}}{cls.__name__.lower()}")
-        if found is not None:
-            return found
-        
-        found = root.find(f"{{*}}{cls.__name__}")
-        if found is not None:
-            return found
-        
+        if source_element is None:
+            source_element = root.find(f"{{*}}{cls.__name__}")
+    
+        print(f"Warning: Could not find matching element for {cls.__name__}, using first child or root")
         # Fallback to first child or root
-        return children[0] if len(children) > 0 else root
+        result = source_element if source_element is not None else root
+        print(f"Using element: {result.tag}")
+        return result
 
     @classmethod
     def _create_dynamic_obj(cls):
