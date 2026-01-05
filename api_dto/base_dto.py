@@ -179,10 +179,10 @@ class BaseDTO:
         if source_element is None:
             source_element = root.find(f"{{*}}{cls.__name__}")
     
-        print(f"Warning: Could not find matching element for {cls.__name__}, using first child or root")
+        # print(f"Warning: Could not find matching element for {cls.__name__}, using first child or root")
         # Fallback to first child or root
         result = source_element if source_element is not None else root
-        print(f"Using element: {result.tag}")
+        # print(f"Using element: {result.tag}")
         return result
 
     @classmethod
