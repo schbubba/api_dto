@@ -1,15 +1,19 @@
-from dataclasses import dataclass, field, asdict, is_dataclass
+from dataclasses import dataclass, field, is_dataclass
 from dacite import from_dict, Config
 from datetime import datetime
-from typing import Literal, get_origin, List, Dict, Set, TypeVar, Union
+from typing import Literal, get_origin, List, Dict, Set, TypeVar, Union, TYPE_CHECKING
 from enum import Enum
 import types
 from .sensitive_fields import SensitiveFields
-from .base_dto import BaseDTO
 import json
 import importlib
 from dataclasses_json import dataclass_json
+import copy
 
+if TYPE_CHECKING:
+    from .base_dto import BaseDTO
+
+import dataclasses
 
 T = TypeVar("T")
 
@@ -17,39 +21,27 @@ _SERIALIZABLE_ADDED = "_serializable_added"
 _NULLABLE_ADDED = "_nullable_added"
 _IS_API_DTO = "_is_api_dto"
 
-_IS_STORED_AS_STRING = "_is_stored_as_string"
+_ATOMIC_TYPES = frozenset({
+    # Common JSON Serializable types
+    types.NoneType,
+    bool,
+    int,
+    float,
+    str,
+    # Other common types
+    complex,
+    bytes,
+    # Other types that are also unaffected by deepcopy
+    types.EllipsisType,
+    types.NotImplementedType,
+    types.CodeType,
+    types.BuiltinFunctionType,
+    types.FunctionType,
+    type,
+    range,
+    property,
+})
 
-class JsonFieldDescriptor:
-    def __init__(self, func):
-        self.func = func
-        self.is_stored_as_string = True
-        self.type = func.__annotations__.get("return")
-        self.name = func.__name__ 
-
-    def __set_name__(self, owner, name):
-        """Called automatically when the class is created."""
-        self.owner = owner
-        self.private_name = f"_{name}"
-
-    def __get__(self, instance, owner):
-        if instance is None:
-            return self  # accessing the property on the class
-        # Return the underlying stored value
-        return getattr(instance, self.private_name, None)
-
-    def __set__(self, instance, value):
-        # Example conversion: store as string
-        if value is None:
-            setattr(instance, self.private_name, None)
-        else:
-            setattr(instance, self.private_name, value)
-
-    def __delete__(self, instance):
-        setattr(instance, self.private_name, None)
-
-
-def json_field(func=None, *, value=True):
-    return JsonFieldDescriptor(func)
 
 # ------------------------------
 # Core DTO decorator
@@ -70,9 +62,9 @@ def api_dto(cls=None, *, optional=True, serializable=True, auto_collections=True
 
             if not is_dataclass(cls):
                 cls = dataclass()(cls=cls)
+                cls = dataclass_json()(cls=cls)
 
             if serializable and not has_serialization:
-                cls = dataclass_json()(cls)
                 cls = add_serializable()(cls)
             
             setattr(cls, _IS_API_DTO, True)
@@ -92,70 +84,38 @@ def add_serializable(cls=None):
         cls.from_http_request = classmethod(_from_http_request)
         cls.to_json = _to_json
         cls.from_json = classmethod(_from_json)
-        cls._find_string_fields = _find_string_fields
         return cls
 
     return wrap if cls is None else wrap(cls)
 
 
-def _find_string_fields(self):
-    """Return {field_name: field_type} for all @store_as_string fields."""
-    result = {}
-    for name, attr in self.__class__.__dict__.items():
-        if isinstance(attr, JsonFieldDescriptor):
-            result[name] = attr.type
-    return result
-
-
-def _to_dict(self, expand_json_fields=False):
+def _to_dict(self):
     """
     Serialize DTO to dict.
-    
-    Args:
-        expand_json_fields: If True, @json_field decorated fields will be 
-                           serialized as nested dicts instead of JSON strings
-    """
-    import json
 
+    """
     try:
         data = asdict(self)
-        
-        if not expand_json_fields:
-            string_fields = self._find_string_fields()
+        # When expanding, just use the nested dict directly
+        annotations = self.__class__.__annotations__
+        for field, _type in annotations.items():
+            value = getattr(self, field)
 
-            for field, _type in string_fields.items():
-                value = getattr(self, field)
-
-                if value is None:
-                    data[field] = None
+            if value is None:
+                data[field] = None
+            else:
+                # Recursively expand nested objects
+                if hasattr(value, "to_dict"):
+                    data[field] = value.to_dict()
                 else:
-                    # full nested object → dict → JSON string
-                    if hasattr(value, "to_dict"):
-                        nested_dict = value.to_dict(expand_json_fields=False)
-                    else:
-                        nested_dict = asdict(value)
-
-                    data[field] = json.dumps(nested_dict)
-        else:
-            # When expanding, just use the nested dict directly
-            string_fields = self._find_string_fields()
-            
-            for field, _type in string_fields.items():
-                value = getattr(self, field)
-
-                if value is None:
-                    data[field] = None
-                else:
-                    # Recursively expand nested objects
-                    if hasattr(value, "to_dict"):
-                        data[field] = value.to_dict(expand_json_fields=True)
-                    else:
-                        data[field] = asdict(value)
+                    data[field] = asdict(value)
 
         return data
 
     except Exception as e:
+        class_name = type(self).__name__
         print(f"Error serializing DTO: {e}")
+        print(f"Class: {class_name}")
         raise
 
 def _from_dict(cls, data):
@@ -305,9 +265,9 @@ async def _from_http_request(cls, request):
 
     return cls.from_dict(data)
 
-def _to_json(self, indent=None, expand_json_fields=False) -> str:
+def _to_json(self, indent=None) -> str:
     import json
-    return json.dumps(self.to_dict(expand_json_fields=expand_json_fields), indent=indent)
+    return json.dumps(self.to_dict(), indent=indent)
 
 def _from_json(cls, json_str: str):
     import json
@@ -446,6 +406,112 @@ def _remove_dataclass(cls):
             delattr(cls, attr)
     
     return cls
+
+def asdict(obj, *, dict_factory=dict):
+    """Return the fields of a dataclass instance as a new dictionary mapping
+    field names to field values.
+
+    Example usage::
+
+      @dataclass
+      class C:
+          x: int
+          y: int
+
+      c = C(1, 2)
+      assert asdict(c) == {'x': 1, 'y': 2}
+
+    If given, 'dict_factory' will be used instead of built-in dict.
+    The function applies recursively to field values that are
+    dataclass instances. This will also look into built-in containers:
+    tuples, lists, and dicts. Other objects are copied with 'copy.deepcopy()'.
+    """
+    return _asdict_inner(obj, dict_factory)
+
+def fields(class_or_instance):
+    """Return a tuple describing the fields of this dataclass.
+
+    Accepts a dataclass or an instance of one. Tuple elements are of
+    type Field.
+    """
+
+    # Might it be worth caching this, per class?
+    try:
+        fields = getattr(class_or_instance, dataclasses._FIELDS)
+    except AttributeError:
+        raise TypeError('must be called with a dataclass type or instance') from None
+
+    # Exclude pseudo-fields.  Note that fields is sorted by insertion
+    # order, so the order of the tuple is as the fields were defined.
+    return tuple(f for f in fields.values() if f._field_type is dataclasses._FIELD)
+
+def _asdict_inner(obj, dict_factory):
+    obj_type = type(obj)
+    if obj_type in _ATOMIC_TYPES:
+        return obj
+    elif hasattr(obj_type, dataclasses._FIELDS):
+        # dataclass instance: fast path for the common case
+        if dict_factory is dict:
+            return {
+                f.name: _asdict_inner(getattr(obj, f.name), dict)
+                for f in fields(obj)
+            }
+        else:
+            return dict_factory([
+                (f.name, _asdict_inner(getattr(obj, f.name), dict_factory))
+                for f in fields(obj)
+            ])
+    # handle the builtin types first for speed; subclasses handled below
+    elif obj_type is list:
+        return [_asdict_inner(v, dict_factory) for v in obj]
+    elif obj_type is dict:
+        return {
+            _asdict_inner(k, dict_factory): _asdict_inner(v, dict_factory)
+            for k, v in obj.items()
+        }
+    elif obj_type is tuple:
+        return tuple([_asdict_inner(v, dict_factory) for v in obj])
+    elif issubclass(obj_type, tuple):
+        if hasattr(obj, '_fields'):
+            # obj is a namedtuple.  Recurse into it, but the returned
+            # object is another namedtuple of the same type.  This is
+            # similar to how other list- or tuple-derived classes are
+            # treated (see below), but we just need to create them
+            # differently because a namedtuple's __init__ needs to be
+            # called differently (see bpo-34363).
+
+            # I'm not using namedtuple's _asdict()
+            # method, because:
+            # - it does not recurse in to the namedtuple fields and
+            #   convert them to dicts (using dict_factory).
+            # - I don't actually want to return a dict here.  The main
+            #   use case here is json.dumps, and it handles converting
+            #   namedtuples to lists.  Admittedly we're losing some
+            #   information here when we produce a json list instead of a
+            #   dict.  Note that if we returned dicts here instead of
+            #   namedtuples, we could no longer call asdict() on a data
+            #   structure where a namedtuple was used as a dict key.
+            return obj_type(*[_asdict_inner(v, dict_factory) for v in obj])
+        else:
+            return obj_type(_asdict_inner(v, dict_factory) for v in obj)
+    elif issubclass(obj_type, dict):
+        if hasattr(obj_type, 'default_factory'):
+            # obj is a defaultdict, which has a different constructor from
+            # dict as it requires the default_factory as its first arg.
+            result = obj_type(obj.default_factory)
+            for k, v in obj.items():
+                result[_asdict_inner(k, dict_factory)] = _asdict_inner(v, dict_factory)
+            return result
+        return obj_type((_asdict_inner(k, dict_factory),
+                         _asdict_inner(v, dict_factory))
+                        for k, v in obj.items())
+    elif issubclass(obj_type, list):
+        # Assume we can create an object of this type by passing in a
+        # generator
+        return obj_type(_asdict_inner(v, dict_factory) for v in obj)
+    else:
+        return copy.deepcopy(obj)
+
 
 def _is_api_dto(obj):
     cls = obj if isinstance(obj, type) else type(obj)

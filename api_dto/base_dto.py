@@ -3,9 +3,9 @@ import io
 import types
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from dataclasses import fields
 from enum import Enum
 from typing import Optional, Any, List, TypeVar, Type, Union, get_args, get_origin
+from dataclasses import dataclass
 
 T = TypeVar("T", bound="BaseDTO")
 
@@ -49,7 +49,6 @@ class BaseDTO:
         obj = cls()
         root = ET.fromstring(xml)
         source_element = cls._xml_get_source_element(root)
-    
         obj._xml_map_element(obj, source_element)
 
         return obj
@@ -69,11 +68,10 @@ class BaseDTO:
         
         # Get object's type annotations
         annotations = getattr(type(obj), "__annotations__", {})
-        
+
         # Map child elements
         for child in element:
             tag = self._camel_to_snake(self._strip_namespace(child.tag))
-            
             # Get the expected type for this property
             expected_type = annotations.get(tag, None)
             origin = get_origin(expected_type) if expected_type else None
@@ -84,7 +82,6 @@ class BaseDTO:
                 expected_type = non_none[0] if non_none else None
                 origin = get_origin(expected_type)
             
-            # Determine how to handle this element
             if origin in (list, List):
                 self._xml_handle_list_element(obj, tag, child, expected_type)
             elif self._xml_is_scalar(child):
@@ -114,12 +111,6 @@ class BaseDTO:
         """
         Determine if the element is a list container or list item.
         Returns True if element is a list item (not the container).
-        
-        :param obj: The parent object
-        :param tag: The property name on the parent object
-        :param element: The XML element to check
-        :return: True if element is a list item, False if it's a container
-        :rtype: bool
         """
         child_elements = list(element)
         
@@ -127,16 +118,15 @@ class BaseDTO:
         if len(child_elements) == 0:
             return True
         
-        # If the element tag matches the singular form of the property name,
-        # then this element IS the list item itself
-        element_tag = self._strip_namespace(element.tag).lower()
-        singular_tag = tag.rstrip('s').lower()
+        # Check if all children have the same tag name
+        if child_elements:
+            first_child_tag = self._strip_namespace(child_elements[0].tag)
+            if all(self._strip_namespace(child.tag) == first_child_tag for child in child_elements):
+                # All children have same tag = this is a container
+                return False
         
-        if element_tag == singular_tag:
-            return True
-        
-        # Otherwise, it's a container
-        return False
+        # Mixed tags or other structure = this is a list item with properties
+        return True
 
     def _xml_auto_parse(self, text: str, target_type: Type = None) -> Any:
         """Parse text to appropriate type"""
@@ -200,34 +190,45 @@ class BaseDTO:
     def _xml_handle_complex_element(self, obj, tag, element: ET.Element, expected_type=None):
         """Handle complex nested objects"""
         # Create the nested object
+        if tag in type(obj).__annotations__.keys():
+            obj_type = type(obj).__annotations__[tag]
+            if obj_type and get_origin(obj_type) is Union:
+                expected_type = expected_type if expected_type else get_args(obj_type)[0]
+
         nested_obj = expected_type() if expected_type else self._xml_get_dto()
         self._xml_set_property(obj, tag, nested_obj)
-        
+
         # Recursively map the element to the nested object
         self._xml_map_element(nested_obj, element)
 
     def _xml_handle_list_element(self, obj, tag, element: ET.Element, list_type):
         """Handle list elements"""
         item_type = get_args(list_type)[0] if list_type else None
-        
         # Get or create the list
         current_list = getattr(obj, tag, None)
         if current_list is None:
             current_list = []
             self._xml_set_property(obj, tag, current_list)
         
-        child_elements = list(element)
-        
+        child_elements = list(element)        
         # Check if element is the list item or the container
         if self._xml_is_list(obj, tag, element):
             # Element IS the list item
             item_obj = item_type() if item_type else self._xml_get_dto()
+
+            # Handle primitive types (str, int, etc.)
+            if item_type in (str, int, float, bool):
+                item_value = element.text.strip() if element.text else None
+                if item_type != str and item_value:
+                    item_value = item_type(item_value)  # Convert to int/float/bool
+                current_list.append(item_value)
+                return
+
             current_list.append(item_obj)
-            
             # Map attributes
             for attr_name, attr_value in element.attrib.items():
                 self._xml_set_property(item_obj, attr_name, attr_value)
-            
+
             # Map child elements
             for child in child_elements:
                 child_tag = self._camel_to_snake(self._strip_namespace(child.tag))
@@ -240,7 +241,7 @@ class BaseDTO:
             for list_item_elem in child_elements:
                 item_obj = item_type() if item_type else self._xml_get_dto()
                 current_list.append(item_obj)
-                
+
                 # Map attributes
                 for attr_name, attr_value in list_item_elem.attrib.items():
                     self._xml_set_property(item_obj, attr_name, attr_value)
@@ -323,7 +324,11 @@ class BaseDTO:
         
         :param value: Description
         """
-        class o(BaseDTO): pass
+        
+        @dataclass
+        class o(BaseDTO): 
+            pass
+
         return o()
 
     def _strip_namespace(self, tag: str) -> str:
