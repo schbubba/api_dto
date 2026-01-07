@@ -7,10 +7,15 @@ from enum import Enum
 from typing import Optional, Any, List, TypeVar, Type, Union, get_args, get_origin
 from dataclasses import dataclass
 
+import aiofiles
+from pathlib import Path
+from lxml import etree
+
 T = TypeVar("T", bound="BaseDTO")
 
 class BaseDTO:
     _namespaces = {}
+    _xml: str
 
     @abstractmethod
     def to_dict(self, expand_json_fields=False) -> dict:
@@ -32,6 +37,36 @@ class BaseDTO:
     def to_json(self, indent=None, expand_json_fields=False) -> str:
         """Encode to JSON string"""
 
+    async def save_xml_file(self, path: str, pretty_xml: bool=False):
+        xml = self._xml
+        if pretty_xml:
+            xml = self._format_xml(xml)
+
+        self._ensure_directory(path)
+        async with aiofiles.open(path, 'w', encoding="utf-8") as file:
+            await file.write(xml)
+
+    async def save_json_file(self, path: str, indent: int=None):
+        self._ensure_directory(path)
+        async with aiofiles.open(path, 'w', encoding="utf-8") as file:
+            await file.write(self.to_json(indent=indent))
+
+    def _format_xml(self, xml: str) -> str:
+        parser = etree.XMLParser(remove_blank_text=True)
+        tree = etree.fromstring(xml.encode(), parser)
+        return etree.tostring(tree, pretty_print=True).decode()
+
+    def _ensure_directory(self, path):
+        p = Path(path)
+
+        # If the path has a suffix, treat it as a file path
+        if p.suffix:
+            dir_path = p.parent
+        else:
+            dir_path = p
+
+        dir_path.mkdir(parents=True, exist_ok=True)
+
     @classmethod
     @abstractmethod
     def from_json(cls, json_str: str):
@@ -47,6 +82,7 @@ class BaseDTO:
         :type xml: str
         """
         obj = cls()
+        obj._xml = xml
         root = ET.fromstring(xml)
         source_element = cls._xml_get_source_element(root)
         obj._xml_map_element(obj, source_element)
