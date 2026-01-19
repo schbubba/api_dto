@@ -92,8 +92,13 @@ class BaseDTO:
     def _load_namespaces_from_xml(self, xml: str):
         for event, elem in ET.iterparse(io.BytesIO(xml.encode('utf-8')), events=['start-ns']):
             prefix, uri = elem
-            print(  f"Registering namespace: prefix='{prefix}', uri='{uri}'"  )
+            print(f"Registering namespace: prefix='{prefix}', uri='{uri}'")
             self._namespaces[prefix] = uri
+
+    def _is_union_type(self, field_type) -> bool:
+        """Check if a type is a Union (including new | syntax)"""
+        origin = get_origin(field_type)
+        return origin is Union or (hasattr(types, 'UnionType') and isinstance(field_type, types.UnionType))
 
     def _xml_map_element(self, obj, element: ET.Element):
         """Map all child elements and attributes to the object"""
@@ -112,8 +117,8 @@ class BaseDTO:
             expected_type = annotations.get(tag, None)
             origin = get_origin(expected_type) if expected_type else None
             
-            # Handle Optional[T]
-            if origin is Union:
+            # Handle Optional[T] and T | None
+            if self._is_union_type(expected_type):
                 non_none = [t for t in get_args(expected_type) if t is not type(None)]
                 expected_type = non_none[0] if non_none else None
                 origin = get_origin(expected_type)
@@ -228,8 +233,16 @@ class BaseDTO:
         # Create the nested object
         if tag in type(obj).__annotations__.keys():
             obj_type = type(obj).__annotations__[tag]
-            if obj_type and get_origin(obj_type) is Union:
-                expected_type = expected_type if expected_type else get_args(obj_type)[0]
+            
+            # Unwrap Union/Optional types to get the actual type
+            if self._is_union_type(obj_type):
+                args = get_args(obj_type)
+                # Get the first non-None type
+                non_none_types = [t for t in args if t is not type(None)]
+                if non_none_types:
+                    expected_type = non_none_types[0]
+            elif expected_type is None:
+                expected_type = obj_type
 
         nested_obj = expected_type() if expected_type else self._xml_get_dto()
         self._xml_set_property(obj, tag, nested_obj)
@@ -298,8 +311,8 @@ class BaseDTO:
         origin = get_origin(expected_type)
         args = get_args(expected_type)
 
-        # Handle Optional / Union[T, None]
-        if origin is Union or origin is None:
+        # Handle Optional / Union[T, None] and T | None
+        if self._is_union_type(expected_type):
             if args:
                 # strip NoneType if present
                 non_none = [t for t in args if t is not type(None)]
@@ -430,7 +443,8 @@ class BaseDTO:
         args = get_args(field_type)
         
         # Handle Union types (including Optional which is Union[T, None])
-        if origin is Union or (hasattr(types, 'UnionType') and origin is types.UnionType):
+        # Also handle new | syntax (types.UnionType)
+        if origin is Union or (hasattr(types, 'UnionType') and isinstance(field_type, types.UnionType)):
             # Filter out NoneType to get the actual type(s)
             non_none_types = [arg for arg in args if arg is not type(None)]
             if len(non_none_types) == 1:
