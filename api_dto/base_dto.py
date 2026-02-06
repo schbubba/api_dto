@@ -103,10 +103,20 @@ class BaseDTO:
     def _xml_map_element(self, obj, element: ET.Element):
         """Map all child elements and attributes to the object"""
         # Map attributes first
+        annotations = getattr(type(obj), "__annotations__", {})
         for attr_name, attr_value in element.attrib.items():
-            if not attr_name.startswith('xmlns'):
-                self._xml_set_property(obj, attr_name, attr_value)
+            prop = self._camel_to_snake(self._strip_namespace(attr_name))
+
+            expected_type = annotations.get(prop)
+            origin = get_origin(expected_type) if expected_type else None
+
+            # 🚫 Skip list attributes here
+            if origin in (list, List):
+                continue
+            self._xml_set_property(obj, attr_name, attr_value)
         
+        if element.text:
+            self._xml_set_property(obj, "_text", element.text)
         # Get object's type annotations
         annotations = getattr(type(obj), "__annotations__", {})
 
@@ -137,7 +147,6 @@ class BaseDTO:
         if property_name in annotations:
             expected_type = annotations[property_name]
             value = self._coerce_value(expected_type, value)
-
         setattr(obj, property_name, value)
 
     def _xml_is_scalar(self, element: ET.Element) -> bool:
@@ -250,58 +259,33 @@ class BaseDTO:
         # Recursively map the element to the nested object
         self._xml_map_element(nested_obj, element)
 
-    def _xml_handle_list_element(self, obj, tag, element: ET.Element, list_type):
-        """Handle list elements"""
-        item_type = get_args(list_type)[0] if list_type else None
-        # Get or create the list
+    def _xml_handle_list_element(self, obj, tag, element, expected_type):
         current_list = getattr(obj, tag, None)
+
         if current_list is None:
             current_list = []
-            self._xml_set_property(obj, tag, current_list)
-        
-        child_elements = list(element)        
-        # Check if element is the list item or the container
-        if self._xml_is_list(obj, tag, element):
-            # Element IS the list item
-            item_obj = item_type() if item_type else self._xml_get_dto()
+            setattr(obj, tag, current_list)
 
-            # Handle primitive types (str, int, etc.)
-            if item_type in (str, int, float, bool):
-                item_value = element.text.strip() if element.text else None
-                if item_type != str and item_value:
-                    item_value = item_type(item_value)  # Convert to int/float/bool
-                current_list.append(item_value)
-                return
+        item_type = get_args(expected_type)[0] if expected_type else None
 
-            current_list.append(item_obj)
-            # Map attributes
-            for attr_name, attr_value in element.attrib.items():
-                self._xml_set_property(item_obj, attr_name, attr_value)
+        # Primitive list (List[str], List[int], etc.)
+        if item_type in (str, int, float, bool):
+            value = element.text.strip() if element.text else None
+            if value is not None and item_type is not str:
+                value = item_type(value)
+            current_list.append(value)
+            return
 
-            # Map child elements
-            for child in child_elements:
-                child_tag = self._camel_to_snake(self._strip_namespace(child.tag))
-                if self._xml_is_scalar(child):
-                    self._xml_handle_scalar_element(item_obj, child_tag, child)
-                else:
-                    self._xml_handle_complex_element(item_obj, child_tag, child)
-        else:
-            # Element is the container, iterate its children
-            for list_item_elem in child_elements:
-                item_obj = item_type() if item_type else self._xml_get_dto()
-                current_list.append(item_obj)
+        # Complex list item
+        item_obj = item_type() if item_type else self._xml_get_dto()
+        current_list.append(item_obj)
 
-                # Map attributes
-                for attr_name, attr_value in list_item_elem.attrib.items():
-                    self._xml_set_property(item_obj, attr_name, attr_value)
-                
-                # Map child elements
-                for child in list_item_elem:
-                    child_tag = self._camel_to_snake(self._strip_namespace(child.tag))
-                    if self._xml_is_scalar(child):
-                        self._xml_handle_scalar_element(item_obj, child_tag, child)
-                    else:
-                        self._xml_handle_complex_element(item_obj, child_tag, child)
+        # Map attributes
+        for attr_name, attr_value in element.attrib.items():
+            self._xml_set_property(item_obj, attr_name, attr_value)
+
+        # Map child elements
+        self._xml_map_element(item_obj, element)
 
     def _coerce_value(self, expected_type, value):
         # Null stays null
